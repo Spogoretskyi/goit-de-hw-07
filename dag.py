@@ -1,5 +1,6 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator, BranchPythonOperator
+from airflow.utils.trigger_rule import TriggerRule
 from airflow.providers.mysql.operators.mysql import MySqlOperator
 from airflow.sensors.sql import SqlSensor
 from datetime import datetime, timedelta
@@ -21,11 +22,12 @@ connection_name = "neo_data_host"
 
 
 def pick_random_medal():
+    random.seed(time.time())
     return random.choice(["Bronze", "Silver", "Gold"])
 
 
 def generate_delay():
-    time.sleep(35)
+    time.sleep(15)
 
 
 with DAG(
@@ -42,7 +44,7 @@ with DAG(
         task_id="create_table",
         mysql_conn_id=connection_name,
         sql="""
-        CREATE TABLE IF NOT EXISTS medal_counts (
+        CREATE TABLE IF NOT EXISTS spogoretskyi_medal_counts (
             id INT AUTO_INCREMENT PRIMARY KEY,
             medal_type VARCHAR(10),
             count INT,
@@ -74,7 +76,7 @@ with DAG(
         task_id="calc_Bronze",
         mysql_conn_id=connection_name,
         sql="""
-        INSERT INTO medal_counts (medal_type, count)
+        INSERT INTO spogoretskyi_medal_counts (medal_type, count)
         SELECT 'Bronze', COUNT(*)
         FROM olympic_dataset.athlete_event_results
         WHERE medal = 'Bronze';
@@ -87,7 +89,7 @@ with DAG(
         task_id="calc_Silver",
         mysql_conn_id=connection_name,
         sql="""
-        INSERT INTO medal_counts (medal_type, count)
+        INSERT INTO spogoretskyi_medal_counts (medal_type, count)
         SELECT 'Silver', COUNT(*)
         FROM olympic_dataset.athlete_event_results
         WHERE medal = 'Silver';
@@ -100,7 +102,7 @@ with DAG(
         task_id="calc_Gold",
         mysql_conn_id=connection_name,
         sql="""
-        INSERT INTO medal_counts (medal_type, count)
+        INSERT INTO spogoretskyi_medal_counts (medal_type, count)
         SELECT 'Gold', COUNT(*)
         FROM olympic_dataset.athlete_event_results
         WHERE medal = 'Gold';
@@ -110,7 +112,9 @@ with DAG(
 
     # 5: Затримка
     generate_delay = PythonOperator(
-        task_id="generate_delay", python_callable=generate_delay
+        task_id="generate_delay",
+        python_callable=generate_delay,
+        trigger_rule=TriggerRule.ONE_SUCCESS,
     )
 
     # 6: Сенсор для перевірки запису
@@ -118,14 +122,20 @@ with DAG(
         task_id="check_for_correctness",
         conn_id=connection_name,
         sql="""
-        SELECT 1
-        FROM medal_counts
-        WHERE TIMESTAMPDIFF(SECOND, created_at, NOW()) <= 30
-        ORDER BY created_at DESC
-        LIMIT 1;
-        """,
+    SELECT 1
+    FROM spogoretskyi_medal_counts
+    WHERE TIMESTAMPDIFF(SECOND, created_at, NOW()) <= 30
+    ORDER BY created_at DESC
+    LIMIT 1;
+    """,
         mode="poke",
         poke_interval=5,
-        timeout=60,
+        timeout=6,
+        trigger_rule=TriggerRule.ONE_SUCCESS,
         hook_params={"schema": "olympic_dataset"},
     )
+
+    # Порядок виконання завдань
+    create_table >> pick_medal >> pick_medal_task
+    pick_medal_task >> [calc_Bronze, calc_Silver, calc_Gold]
+    [calc_Bronze, calc_Silver, calc_Gold] >> generate_delay >> check_for_correctness
